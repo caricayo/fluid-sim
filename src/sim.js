@@ -154,28 +154,258 @@ void main(){
   frag = base + vec4(u_value * a, 1.0);
 }`;
 
-// Simple render with gamma correction
+// Bloom threshold - extract bright areas
+const FS_BLOOM_PREFILTER = `#version 300 es
+precision highp float;
+out vec4 frag;
+uniform sampler2D u_dye;
+uniform vec2 u_texelSize;
+uniform float u_threshold;
+uniform float u_knee;
+void main(){
+  vec2 uv = gl_FragCoord.xy * u_texelSize;
+  vec3 c = texture(u_dye, uv).rgb;
+  float brightness = max(c.r, max(c.g, c.b));
+  float soft = brightness - u_threshold + u_knee;
+  soft = clamp(soft, 0.0, 2.0 * u_knee);
+  soft = soft * soft / (4.0 * u_knee + 1e-4);
+  float contribution = max(soft, brightness - u_threshold);
+  contribution /= max(brightness, 1e-4);
+  frag = vec4(c * contribution, 1.0);
+}`;
+
+// Gaussian blur
+const FS_BLUR = `#version 300 es
+precision highp float;
+out vec4 frag;
+uniform sampler2D u_source;
+uniform vec2 u_texelSize;
+uniform vec2 u_direction;
+const float weights[5] = float[](0.227027, 0.1945946, 0.1216216, 0.054054, 0.016216);
+void main(){
+  vec2 uv = gl_FragCoord.xy * u_texelSize;
+  vec3 result = texture(u_source, uv).rgb * weights[0];
+  for(int i = 1; i < 5; ++i) {
+    vec2 offset = float(i) * u_direction * u_texelSize;
+    result += texture(u_source, uv + offset).rgb * weights[i];
+    result += texture(u_source, uv - offset).rgb * weights[i];
+  }
+  frag = vec4(result, 1.0);
+}`;
+
+// Advanced bloom combine with multiple blending modes
+const FS_BLOOM_FINAL = `#version 300 es
+precision highp float;
+out vec4 frag;
+uniform sampler2D u_base;
+uniform sampler2D u_bloom;
+uniform vec2 u_texelSize;
+uniform float u_intensity;
+uniform float u_saturation;
+uniform int u_blendMode; // 0=add, 1=screen, 2=overlay, 3=soft light
+uniform float u_detailPreservation;
+uniform float u_baseTexture;
+uniform float u_brightness;
+uniform float u_contrast;
+uniform vec3 u_colorBalance;
+uniform float u_exposure;
+uniform float u_whitePoint;
+uniform int u_tonemapMode;
+
+vec3 screen(vec3 base, vec3 blend) {
+    return 1.0 - (1.0 - base) * (1.0 - blend);
+}
+
+vec3 overlay(vec3 base, vec3 blend) {
+    return mix(
+        2.0 * base * blend,
+        1.0 - 2.0 * (1.0 - base) * (1.0 - blend),
+        step(0.5, base)
+    );
+}
+
+vec3 softLight(vec3 base, vec3 blend) {
+    return mix(
+        2.0 * base * blend + base * base * (1.0 - 2.0 * blend),
+        sqrt(base) * (2.0 * blend - 1.0) + 2.0 * base * (1.0 - blend),
+        step(0.5, blend)
+    );
+}
+
+vec3 aces(vec3 color) {
+    const float A = 2.51, B = 0.03, C = 2.43, D = 0.59, E = 0.14;
+    return clamp((color * (A * color + B)) / (color * (C * color + D) + E), 0.0, 1.0);
+}
+
+vec3 reinhard(vec3 color) {
+    return color / (1.0 + color);
+}
+
+vec3 filmic(vec3 color) {
+    color = max(vec3(0.0), color - 0.004);
+    return (color * (6.2 * color + 0.5)) / (color * (6.2 * color + 1.7) + 0.06);
+}
+
+void main(){
+  vec2 uv = gl_FragCoord.xy * u_texelSize;
+  
+  // Get raw base color and apply basic rendering
+  vec3 base = texture(u_base, uv).rgb;
+  
+  // Apply color grading to base (same as in render shader)
+  base *= u_brightness;
+  base = (base - 0.5) * u_contrast + 0.5;
+  base *= u_colorBalance;
+  base *= pow(2.0, u_exposure);
+  base /= u_whitePoint;
+  
+  // Apply tone mapping to base
+  if (u_tonemapMode == 1) {
+    base = aces(base);
+  } else if (u_tonemapMode == 2) {
+    base = reinhard(base);
+  } else if (u_tonemapMode == 3) {
+    base = filmic(base);
+  }
+  
+  // Get bloom and enhance saturation
+  vec3 bloom = texture(u_bloom, uv).rgb * u_intensity;
+  float luminance = dot(bloom, vec3(0.299, 0.587, 0.114));
+  bloom = mix(vec3(luminance), bloom, u_saturation);
+  
+  // Apply different blending modes
+  vec3 result;
+  if (u_blendMode == 1) {
+      result = screen(base, bloom);
+  } else if (u_blendMode == 2) {
+      result = overlay(base, bloom);
+  } else if (u_blendMode == 3) {
+      result = softLight(base, bloom);
+  } else {
+      result = base + bloom; // Additive (default)
+  }
+  
+  // Detail preservation - blend with original base
+  float baseLuminance = dot(base, vec3(0.299, 0.587, 0.114));
+  float preservation = u_detailPreservation * (1.0 - smoothstep(0.0, 1.0, baseLuminance));
+  result = mix(result, base + bloom * 0.3, preservation);
+  
+  // Base texture preservation - always maintain some of the original texture
+  // This ensures texture is visible even with maximum bloom intensity
+  float baseAmount = u_baseTexture;
+  vec3 finalResult = mix(result, base + result * 0.5, baseAmount * (1.0 - baseLuminance * 0.5));
+  
+  frag = vec4(finalResult, 1.0);
+}`;
+
+// Advanced render with professional tone mapping
 const FS_RENDER = `#version 300 es
 precision highp float;
 out vec4 frag;
 uniform sampler2D u_dye;
 uniform vec2 u_texelSize;
+uniform float u_brightness;
+uniform float u_contrast;
+uniform vec3 u_colorBalance;
+uniform float u_exposure;
+uniform float u_whitePoint;
+uniform int u_tonemapMode; // 0=Reinhard, 1=ACES, 2=Filmic
+
+// Reinhard tone mapping
+vec3 reinhard(vec3 color, float whitePoint) {
+    return color / (1.0 + color / (whitePoint * whitePoint));
+}
+
+// Simplified ACES tone mapping
+vec3 aces(vec3 color) {
+    const float A = 2.51;
+    const float B = 0.03;
+    const float C = 2.43;
+    const float D = 0.59;
+    const float E = 0.14;
+    return clamp((color * (A * color + B)) / (color * (C * color + D) + E), 0.0, 1.0);
+}
+
+// Filmic tone mapping
+vec3 filmic(vec3 color) {
+    vec3 x = max(vec3(0.0), color - 0.004);
+    return (x * (6.2 * x + 0.5)) / (x * (6.2 * x + 1.7) + 0.06);
+}
+
+// Local contrast enhancement
+vec3 localContrast(sampler2D tex, vec2 uv, vec2 texelSize, float strength) {
+    vec3 center = texture(tex, uv).rgb;
+    vec3 blur = texture(tex, uv + vec2(-1, -1) * texelSize).rgb;
+    blur += texture(tex, uv + vec2(0, -1) * texelSize).rgb;
+    blur += texture(tex, uv + vec2(1, -1) * texelSize).rgb;
+    blur += texture(tex, uv + vec2(-1, 0) * texelSize).rgb;
+    blur += texture(tex, uv + vec2(1, 0) * texelSize).rgb;
+    blur += texture(tex, uv + vec2(-1, 1) * texelSize).rgb;
+    blur += texture(tex, uv + vec2(0, 1) * texelSize).rgb;
+    blur += texture(tex, uv + vec2(1, 1) * texelSize).rgb;
+    blur /= 8.0;
+    
+    return center + (center - blur) * strength;
+}
+
 void main(){
-  vec3 c = texture(u_dye, gl_FragCoord.xy * u_texelSize).rgb;
-  // soft tonemap
-  c = c / (1.0 + max(max(c.r, c.g), c.b));
-  // gamma
-  c = pow(c, vec3(1.0/2.2));
+  vec2 uv = gl_FragCoord.xy * u_texelSize;
+  vec3 c = texture(u_dye, uv).rgb;
+  
+  // Local contrast enhancement for detail preservation
+  c = localContrast(u_dye, uv, u_texelSize, 0.3);
+  
+  // Color balance adjustment
+  c *= u_colorBalance;
+  
+  // Exposure adjustment (before tone mapping)
+  c *= pow(2.0, u_exposure);
+  
+  // Brightness and contrast
+  c = (c - 0.5) * u_contrast + 0.5 + u_brightness;
+  
+  // Advanced tone mapping
+  if (u_tonemapMode == 1) {
+      c = aces(c);
+  } else if (u_tonemapMode == 2) {
+      c = filmic(c);
+  } else {
+      c = reinhard(c, u_whitePoint);
+  }
+  
+  // Gamma correction
+  c = pow(max(c, vec3(0.0)), vec3(1.0/2.2));
+  
   frag = vec4(c, 1.0);
 }`;
 
 function uniformLoc(gl, prog, name) {
   const loc = gl.getUniformLocation(prog, name);
-  if (loc === null) throw new Error(`Uniform not found: ${name}`);
+  if (loc === null) {
+    console.warn(`Uniform not found: ${name} (this is OK if unused by shader)`);
+    return null;
+  }
   return loc;
 }
 
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+// Safe uniform setting functions
+function setUniform1f(gl, location, value) {
+  if (location !== null) gl.uniform1f(location, value);
+}
+
+function setUniform1i(gl, location, value) {
+  if (location !== null) gl.uniform1i(location, value);
+}
+
+function setUniform2f(gl, location, x, y) {
+  if (location !== null) gl.uniform2f(location, x, y);
+}
+
+function setUniform3f(gl, location, x, y, z) {
+  if (location !== null) gl.uniform3f(location, x, y, z);
+}
 
 export class FluidSim {
   constructor(canvas, options = {}) {
@@ -197,6 +427,25 @@ export class FluidSim {
       splatRadius: 0.015,
       qualityScale: 0.75, // 0..1, sim resolution scalar
       maxDPR: 1.8,
+      // Visual effects
+      bloomEnabled: true,
+      bloomThreshold: 0.6,
+      bloomKnee: 0.7,
+      bloomIntensity: 0.8,
+      bloomSaturation: 1.2,
+      bloomBlendMode: 0, // Start with additive (safest)
+      detailPreservation: 0.2, // Reduced for stability
+      baseTexture: 0.15, // Always preserve some texture detail
+      brightness: 0.0,
+      contrast: 1.0,
+      colorBalance: [1.0, 1.0, 1.0],
+      // Advanced rendering
+      exposure: 0.0,
+      whitePoint: 2.0,
+      tonemapMode: 0, // Start with Reinhard (safest)
+      // Color palettes
+      colorPalette: 'rainbow',
+      paletteSpeed: 1.0,
     };
     Object.assign(this.settings, options);
 
@@ -216,6 +465,9 @@ export class FluidSim {
       vorticity: createProgram(gl, VS_SCREEN, FS_VORTICITY),
       splat: createProgram(gl, VS_SCREEN, FS_SPLAT),
       render: createProgram(gl, VS_SCREEN, FS_RENDER),
+      bloomPrefilter: createProgram(gl, VS_SCREEN, FS_BLOOM_PREFILTER),
+      blur: createProgram(gl, VS_SCREEN, FS_BLUR),
+      bloomFinal: createProgram(gl, VS_SCREEN, FS_BLOOM_FINAL),
     };
 
     // Uniform locations cached
@@ -264,6 +516,39 @@ export class FluidSim {
       render: {
         u_dye: U(this.programs.render, "u_dye"),
         u_texelSize: U(this.programs.render, "u_texelSize"),
+        u_brightness: U(this.programs.render, "u_brightness"),
+        u_contrast: U(this.programs.render, "u_contrast"),
+        u_colorBalance: U(this.programs.render, "u_colorBalance"),
+        u_exposure: U(this.programs.render, "u_exposure"),
+        u_whitePoint: U(this.programs.render, "u_whitePoint"),
+        u_tonemapMode: U(this.programs.render, "u_tonemapMode"),
+      },
+      bloomPrefilter: {
+        u_dye: U(this.programs.bloomPrefilter, "u_dye"),
+        u_texelSize: U(this.programs.bloomPrefilter, "u_texelSize"),
+        u_threshold: U(this.programs.bloomPrefilter, "u_threshold"),
+        u_knee: U(this.programs.bloomPrefilter, "u_knee"),
+      },
+      blur: {
+        u_source: U(this.programs.blur, "u_source"),
+        u_texelSize: U(this.programs.blur, "u_texelSize"),
+        u_direction: U(this.programs.blur, "u_direction"),
+      },
+      bloomFinal: {
+        u_base: U(this.programs.bloomFinal, "u_base"),
+        u_bloom: U(this.programs.bloomFinal, "u_bloom"),
+        u_texelSize: U(this.programs.bloomFinal, "u_texelSize"),
+        u_intensity: U(this.programs.bloomFinal, "u_intensity"),
+        u_saturation: U(this.programs.bloomFinal, "u_saturation"),
+        u_blendMode: U(this.programs.bloomFinal, "u_blendMode"),
+        u_detailPreservation: U(this.programs.bloomFinal, "u_detailPreservation"),
+        u_baseTexture: U(this.programs.bloomFinal, "u_baseTexture"),
+        u_brightness: U(this.programs.bloomFinal, "u_brightness"),
+        u_contrast: U(this.programs.bloomFinal, "u_contrast"),
+        u_colorBalance: U(this.programs.bloomFinal, "u_colorBalance"),
+        u_exposure: U(this.programs.bloomFinal, "u_exposure"),
+        u_whitePoint: U(this.programs.bloomFinal, "u_whitePoint"),
+        u_tonemapMode: U(this.programs.bloomFinal, "u_tonemapMode"),
       },
     };
 
@@ -287,6 +572,14 @@ export class FluidSim {
     this.divergence = makeFBO(gl, width, height, R, R_FMT, type, filter);
     this.curl = makeFBO(gl, width, height, R, R_FMT, type, filter);
     this.dye = makeDoubleFBO(gl, width, height, RGBA, RGBA_FMT, type, filter);
+    
+    // Bloom framebuffers (full resolution to avoid sampling issues)
+    const bloomW = width;
+    const bloomH = height;
+    this.bloom = {
+      prefilter: makeFBO(gl, bloomW, bloomH, RGBA, RGBA_FMT, type, filter),
+      blur: makeDoubleFBO(gl, bloomW, bloomH, RGBA, RGBA_FMT, type, filter),
+    };
   }
 
   _dispose() {
@@ -296,6 +589,10 @@ export class FluidSim {
     if (this.divergence) { gl.deleteFramebuffer(this.divergence.fb); gl.deleteTexture(this.divergence.tex); }
     if (this.curl) { gl.deleteFramebuffer(this.curl.fb); gl.deleteTexture(this.curl.tex); }
     if (this.dye) this.dye.dispose();
+    if (this.bloom) {
+      if (this.bloom.prefilter) { gl.deleteFramebuffer(this.bloom.prefilter.fb); gl.deleteTexture(this.bloom.prefilter.tex); }
+      if (this.bloom.blur) this.bloom.blur.dispose();
+    }
   }
 
   _resize() {
@@ -321,7 +618,7 @@ export class FluidSim {
 
   _setCommonUniforms(program, texelW, texelH) {
     const gl = this.gl;
-    gl.uniform2f(this.u[program].u_texelSize, 1 / texelW, 1 / texelH);
+    setUniform2f(gl, this.u[program].u_texelSize, 1 / texelW, 1 / texelH);
   }
 
   step(dt) {
@@ -336,8 +633,8 @@ export class FluidSim {
     gl.useProgram(this.programs.curl);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.velocity.read.tex);
-    gl.uniform1i(this.u.curl.u_velocity, 0);
-    gl.uniform2f(this.u.curl.u_texelSize, texel[0], texel[1]);
+    setUniform1i(gl, this.u.curl.u_velocity, 0);
+    setUniform2f(gl, this.u.curl.u_texelSize, texel[0], texel[1]);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
 
     // Vorticity confinement
@@ -346,12 +643,12 @@ export class FluidSim {
       setViewport(gl, this.velocity.write);
       gl.useProgram(this.programs.vorticity);
       gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this.velocity.read.tex);
-      gl.uniform1i(this.u.vorticity.u_velocity, 0);
+      setUniform1i(gl, this.u.vorticity.u_velocity, 0);
       gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this.curl.tex);
-      gl.uniform1i(this.u.vorticity.u_curl, 1);
-      gl.uniform2f(this.u.vorticity.u_texelSize, texel[0], texel[1]);
-      gl.uniform1f(this.u.vorticity.u_dt, dt);
-      gl.uniform1f(this.u.vorticity.u_eps, this.settings.vorticity);
+      setUniform1i(gl, this.u.vorticity.u_curl, 1);
+      setUniform2f(gl, this.u.vorticity.u_texelSize, texel[0], texel[1]);
+      setUniform1f(gl, this.u.vorticity.u_dt, dt);
+      setUniform1f(gl, this.u.vorticity.u_eps, this.settings.vorticity);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
       this.velocity.swap();
     }
@@ -361,13 +658,13 @@ export class FluidSim {
     setViewport(gl, this.velocity.write);
     gl.useProgram(this.programs.advect);
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this.velocity.read.tex);
-    gl.uniform1i(this.u.advect.u_source, 0);
+    setUniform1i(gl, this.u.advect.u_source, 0);
     gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this.velocity.read.tex);
-    gl.uniform1i(this.u.advect.u_velocity, 1);
-    gl.uniform2f(this.u.advect.u_texelSize, texel[0], texel[1]);
-    gl.uniform2f(this.u.advect.u_resolution, w, h);
-    gl.uniform1f(this.u.advect.u_dt, dt);
-    gl.uniform1f(this.u.advect.u_dissipation, this.settings.velDissipation);
+    setUniform1i(gl, this.u.advect.u_velocity, 1);
+    setUniform2f(gl, this.u.advect.u_texelSize, texel[0], texel[1]);
+    setUniform2f(gl, this.u.advect.u_resolution, w, h);
+    setUniform1f(gl, this.u.advect.u_dt, dt);
+    setUniform1f(gl, this.u.advect.u_dissipation, this.settings.velDissipation);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     this.velocity.swap();
 
@@ -376,8 +673,8 @@ export class FluidSim {
     setViewport(gl, this.divergence);
     gl.useProgram(this.programs.divergence);
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this.velocity.read.tex);
-    gl.uniform1i(this.u.divergence.u_velocity, 0);
-    gl.uniform2f(this.u.divergence.u_texelSize, texel[0], texel[1]);
+    setUniform1i(gl, this.u.divergence.u_velocity, 0);
+    setUniform2f(gl, this.u.divergence.u_texelSize, texel[0], texel[1]);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
 
     // Pressure solve iterations
@@ -386,10 +683,10 @@ export class FluidSim {
       bindFBO(gl, this.pressure.write);
       setViewport(gl, this.pressure.write);
       gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this.pressure.read.tex);
-      gl.uniform1i(this.u.pressure.u_pressure, 0);
+      setUniform1i(gl, this.u.pressure.u_pressure, 0);
       gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this.divergence.tex);
-      gl.uniform1i(this.u.pressure.u_divergence, 1);
-      gl.uniform2f(this.u.pressure.u_texelSize, texel[0], texel[1]);
+      setUniform1i(gl, this.u.pressure.u_divergence, 1);
+      setUniform2f(gl, this.u.pressure.u_texelSize, texel[0], texel[1]);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
       this.pressure.swap();
     }
@@ -399,10 +696,10 @@ export class FluidSim {
     setViewport(gl, this.velocity.write);
     gl.useProgram(this.programs.gradient);
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this.velocity.read.tex);
-    gl.uniform1i(this.u.gradient.u_velocity, 0);
+    setUniform1i(gl, this.u.gradient.u_velocity, 0);
     gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this.pressure.read.tex);
-    gl.uniform1i(this.u.gradient.u_pressure, 1);
-    gl.uniform2f(this.u.gradient.u_texelSize, texel[0], texel[1]);
+    setUniform1i(gl, this.u.gradient.u_pressure, 1);
+    setUniform2f(gl, this.u.gradient.u_texelSize, texel[0], texel[1]);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     this.velocity.swap();
 
@@ -411,26 +708,94 @@ export class FluidSim {
     setViewport(gl, this.dye.write);
     gl.useProgram(this.programs.advect);
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this.dye.read.tex);
-    gl.uniform1i(this.u.advect.u_source, 0);
+    setUniform1i(gl, this.u.advect.u_source, 0);
     gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this.velocity.read.tex);
-    gl.uniform1i(this.u.advect.u_velocity, 1);
-    gl.uniform2f(this.u.advect.u_texelSize, texel[0], texel[1]);
-    gl.uniform2f(this.u.advect.u_resolution, w, h);
-    gl.uniform1f(this.u.advect.u_dt, dt);
-    gl.uniform1f(this.u.advect.u_dissipation, this.settings.dyeDissipation);
+    setUniform1i(gl, this.u.advect.u_velocity, 1);
+    setUniform2f(gl, this.u.advect.u_texelSize, texel[0], texel[1]);
+    setUniform2f(gl, this.u.advect.u_resolution, w, h);
+    setUniform1f(gl, this.u.advect.u_dt, dt);
+    setUniform1f(gl, this.u.advect.u_dissipation, this.settings.dyeDissipation);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     this.dye.swap();
   }
 
   renderToScreen() {
     const gl = this.gl;
-    bindFBO(gl, null);
-    setViewport(gl, null);
-    gl.useProgram(this.programs.render);
-    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this.dye.read.tex);
-    gl.uniform1i(this.u.render.u_dye, 0);
-    gl.uniform2f(this.u.render.u_texelSize, 1 / this.dye.read.w, 1 / this.dye.read.h);
-    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    
+    if (this.settings.bloomEnabled) {
+      // Bloom prefilter - extract bright areas
+      bindFBO(gl, this.bloom.prefilter);
+      setViewport(gl, this.bloom.prefilter);
+      gl.useProgram(this.programs.bloomPrefilter);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, this.dye.read.tex);
+      setUniform1i(gl, this.u.bloomPrefilter.u_dye, 0);
+      setUniform2f(gl, this.u.bloomPrefilter.u_texelSize, 1 / this.dye.read.w, 1 / this.dye.read.h);
+      setUniform1f(gl, this.u.bloomPrefilter.u_threshold, this.settings.bloomThreshold);
+      setUniform1f(gl, this.u.bloomPrefilter.u_knee, this.settings.bloomKnee);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      
+      // Horizontal blur
+      bindFBO(gl, this.bloom.blur.write);
+      setViewport(gl, this.bloom.blur.write);
+      gl.useProgram(this.programs.blur);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, this.bloom.prefilter.tex);
+      setUniform1i(gl, this.u.blur.u_source, 0);
+      setUniform2f(gl, this.u.blur.u_texelSize, 1 / this.bloom.prefilter.w, 1 / this.bloom.prefilter.h);
+      setUniform2f(gl, this.u.blur.u_direction, 1, 0);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      this.bloom.blur.swap();
+      
+      // Vertical blur
+      bindFBO(gl, this.bloom.blur.write);
+      setViewport(gl, this.bloom.blur.write);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, this.bloom.blur.read.tex);
+      setUniform2f(gl, this.u.blur.u_direction, 0, 1);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      this.bloom.blur.swap();
+      
+      // Final composite with bloom
+      bindFBO(gl, null);
+      setViewport(gl, null);
+      gl.useProgram(this.programs.bloomFinal);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, this.dye.read.tex);
+      setUniform1i(gl, this.u.bloomFinal.u_base, 0);
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, this.bloom.blur.read.tex);
+      setUniform1i(gl, this.u.bloomFinal.u_bloom, 1);
+      setUniform2f(gl, this.u.bloomFinal.u_texelSize, 1 / gl.drawingBufferWidth, 1 / gl.drawingBufferHeight);
+      setUniform1f(gl, this.u.bloomFinal.u_intensity, this.settings.bloomIntensity);
+      setUniform1f(gl, this.u.bloomFinal.u_saturation, this.settings.bloomSaturation);
+      setUniform1i(gl, this.u.bloomFinal.u_blendMode, this.settings.bloomBlendMode);
+      setUniform1f(gl, this.u.bloomFinal.u_detailPreservation, this.settings.detailPreservation);
+      setUniform1f(gl, this.u.bloomFinal.u_baseTexture, this.settings.baseTexture);
+      setUniform1f(gl, this.u.bloomFinal.u_brightness, this.settings.brightness);
+      setUniform1f(gl, this.u.bloomFinal.u_contrast, this.settings.contrast);
+      setUniform3f(gl, this.u.bloomFinal.u_colorBalance, ...this.settings.colorBalance);
+      setUniform1f(gl, this.u.bloomFinal.u_exposure, this.settings.exposure);
+      setUniform1f(gl, this.u.bloomFinal.u_whitePoint, this.settings.whitePoint);
+      setUniform1i(gl, this.u.bloomFinal.u_tonemapMode, this.settings.tonemapMode);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    } else {
+      // Simple render without bloom
+      bindFBO(gl, null);
+      setViewport(gl, null);
+      gl.useProgram(this.programs.render);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, this.dye.read.tex);
+      setUniform1i(gl, this.u.render.u_dye, 0);
+      setUniform2f(gl, this.u.render.u_texelSize, 1 / this.dye.read.w, 1 / this.dye.read.h);
+      setUniform1f(gl, this.u.render.u_brightness, this.settings.brightness);
+      setUniform1f(gl, this.u.render.u_contrast, this.settings.contrast);
+      setUniform3f(gl, this.u.render.u_colorBalance, ...this.settings.colorBalance);
+      setUniform1f(gl, this.u.render.u_exposure, this.settings.exposure);
+      setUniform1f(gl, this.u.render.u_whitePoint, this.settings.whitePoint);
+      setUniform1i(gl, this.u.render.u_tonemapMode, this.settings.tonemapMode);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    }
   }
 
   splat(point01, value3, radius01, target) {
@@ -440,11 +805,11 @@ export class FluidSim {
     setViewport(gl, tgt.write);
     gl.useProgram(this.programs.splat);
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tgt.read.tex);
-    gl.uniform1i(this.u.splat.u_target, 0);
-    gl.uniform2f(this.u.splat.u_point, point01[0], point01[1]);
-    gl.uniform3f(this.u.splat.u_value, value3[0], value3[1], value3[2] ?? 0.0);
-    gl.uniform1f(this.u.splat.u_radius, radius01);
-    gl.uniform2f(this.u.splat.u_texelSize, 1 / tgt.read.w, 1 / tgt.read.h);
+    setUniform1i(gl, this.u.splat.u_target, 0);
+    setUniform2f(gl, this.u.splat.u_point, point01[0], point01[1]);
+    setUniform3f(gl, this.u.splat.u_value, value3[0], value3[1], value3[2] ?? 0.0);
+    setUniform1f(gl, this.u.splat.u_radius, radius01);
+    setUniform2f(gl, this.u.splat.u_texelSize, 1 / tgt.read.w, 1 / tgt.read.h);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     tgt.swap();
   }

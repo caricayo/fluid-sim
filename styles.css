@@ -56,3 +56,92 @@ html, body {
   #ui .hint::after { content: " • Motion reduced"; }
 }
 
+/* Custom dat.GUI styling */
+.dg.ac {
+  background: var(--glass) !important;
+  border: 1px solid var(--glass-border) !important;
+  border-radius: 12px !important;
+  backdrop-filter: blur(8px) saturate(1.1) !important;
+  -webkit-backdrop-filter: blur(8px) saturate(1.1) !important;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3) !important;
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, sans-serif !important;
+}
+
+.dg .title {
+  background: transparent !important;
+  color: var(--fg) !important;
+  font-weight: 600 !important;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5) !important;
+}
+
+.dg .folder-title {
+  color: var(--fg) !important;
+  background: rgba(255, 255, 255, 0.05) !important;
+  border-bottom: 1px solid var(--glass-border) !important;
+  font-weight: 600 !important;
+}
+
+.dg .property-name {
+  color: var(--fg) !important;
+  font-weight: 500 !important;
+}
+
+.dg .c input[type=text], 
+.dg .c input[type=number] {
+  background: rgba(255, 255, 255, 0.08) !important;
+  color: var(--fg) !important;
+  border: 1px solid var(--glass-border) !important;
+  border-radius: 4px !important;
+}
+
+.dg .c input[type=text]:focus,
+.dg .c input[type=number]:focus {
+  background: rgba(255, 255, 255, 0.12) !important;
+  border-color: rgba(255, 255, 255, 0.3) !important;
+}
+
+.dg .c .slider {
+  background: rgba(255, 255, 255, 0.1) !important;
+  border-radius: 4px !important;
+}
+
+.dg .c .slider:before {
+  background: linear-gradient(90deg, #667eea 0%, #764ba2 100%) !important;
+  border-radius: 2px !important;
+}
+
+.dg .c .slider-fg {
+  background: linear-gradient(90deg, #667eea 0%, #764ba2 100%) !important;
+  border-radius: 4px !important;
+}
+
+.dg .c .button {
+  background: linear-gradient(135deg, var(--glass), rgba(255, 255, 255, 0.1)) !important;
+  color: var(--fg) !important;
+  border: 1px solid var(--glass-border) !important;
+  border-radius: 6px !important;
+  font-weight: 500 !important;
+  transition: all 0.2s ease !important;
+}
+
+.dg .c .button:hover {
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.15), rgba(255, 255, 255, 0.2)) !important;
+  border-color: rgba(255, 255, 255, 0.3) !important;
+}
+
+.dg select {
+  background: rgba(255, 255, 255, 0.08) !important;
+  color: var(--fg) !important;
+  border: 1px solid var(--glass-border) !important;
+  border-radius: 4px !important;
+}
+
+.dg li:not(.folder) {
+  border-left: 2px solid transparent !important;
+}
+
+.dg li:hover:not(.folder) {
+  background: rgba(255, 255, 255, 0.05) !important;
+  border-left-color: rgba(255, 255, 255, 0.3) !important;
+}
+
