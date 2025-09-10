@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Fluid Smoke — WebGL2</title>
+    <meta name="color-scheme" content="dark light" />
+    <link rel="preload" href="./src/app.js" as="script" type="module" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <canvas id="sim" aria-label="Interactive smoke simulation" role="img"></canvas>
+    <div id="ui" aria-hidden="true">
+      <div class="row">
+        <span>Fluid Smoke — WebGL2</span>
+        <span class="spacer"></span>
+        <span class="hint">Click/drag to stir • Keys: [P]ause [Q]uality [V]orticity [R]eset</span>
+      </div>
+    </div>
+    <noscript>
+      This interactive requires JavaScript and WebGL2.
+    </noscript>
+    <script type="module" src="./src/app.js"></script>
+  </body>
+  </html>
+
